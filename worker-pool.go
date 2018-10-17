@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -86,15 +87,26 @@ func (d Downloader) Perform() {
 	d.Result <- response
 }
 
+type ThreadSafePrinter struct {
+	sync.Mutex
+}
+
+func (p ThreadSafePrinter) Println(args ...interface{}) {
+	p.Lock()
+	defer p.Unlock()
+	fmt.Println(args...)
+}
+
 func main() {
+	p := ThreadSafePrinter{}
 	done := make(chan bool)
 	results := make(chan Response)
 	go func(results chan Response) {
 		for response := range results {
 			if response.Err != nil {
-				fmt.Println("Failed to fetch response: ", response.Err)
+				p.Println("Failed to fetch response: ", response.Err)
 			} else {
-				fmt.Println("Got response: ", response.Content[0:20])
+				p.Println("Got response: ", response.Content[0:80])
 			}
 		}
 		done <- true
