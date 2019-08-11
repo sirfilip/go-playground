@@ -2,140 +2,89 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
 	"sync"
 	"time"
 )
 
-type Pool interface {
-	Start()
-	Assign(Job)
-	Shutdown()
-}
-
 type Job interface {
-	Perform()
+	Perform() error
 }
 
-type FixedPool struct {
-	Capacity int
+type WorkerPool interface {
+	Start() error
+	Add(Job) error
+	Shutdown() error
+}
+
+type WorkerPoolImpl struct {
 	queue    chan Job
-	kill     []chan bool
+	wg       *sync.WaitGroup
+	capacity int
 }
 
-func (fp *FixedPool) Start() {
-	fp.kill = make([]chan bool, 0, fp.Capacity)
-	fp.queue = make(chan Job)
-	for i := 0; i < fp.Capacity; i++ {
-		quit := make(chan bool)
-		fp.kill = append(fp.kill, quit)
-		go func(quit chan bool, queue chan Job) {
-			for {
-				select {
-				case job := <-queue:
-					job.Perform()
-				case <-quit:
-					return
-				}
+func (self WorkerPoolImpl) Start() error {
+	self.wg.Add(self.capacity)
+	for i := 0; i < self.capacity; i++ {
+		go func() {
+			for job := range self.queue {
+				job.Perform()
 			}
-		}(quit, fp.queue)
+			self.wg.Done()
+		}()
+	}
+	return nil
+}
+
+func (self WorkerPoolImpl) Add(job Job) error {
+	self.queue <- job
+	return nil
+}
+
+func (self WorkerPoolImpl) Shutdown() error {
+	close(self.queue)
+	self.wg.Wait()
+	return nil
+}
+
+func NewWorkerPool(capacity int) WorkerPoolImpl {
+	queue := make(chan Job, capacity)
+	wg := new(sync.WaitGroup)
+	return WorkerPoolImpl{
+		queue:    queue,
+		wg:       wg,
+		capacity: capacity,
 	}
 }
 
-func (fp *FixedPool) Assign(job Job) {
-	fp.queue <- job
+type JobImpl struct {
+	id  int
+	out chan int
 }
 
-func (fp *FixedPool) Shutdown() {
-	for i := 0; i < fp.Capacity; i++ {
-		fp.kill[i] <- true
-		close(fp.kill[i])
-	}
-	close(fp.queue)
-}
-
-type Response struct {
-	Content string
-	Err     error
-}
-
-type Downloader struct {
-	URL    string
-	Result chan Response
-}
-
-func (d Downloader) Perform() {
-	log.Println("Downloading: ", d.URL)
-	// mimic long running task
+func (self JobImpl) Perform() error {
 	time.Sleep(1 * time.Second)
-	response := Response{Content: "", Err: nil}
-	resp, err := http.Get(d.URL)
-	if err != nil {
-		response.Err = err
-		return
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		response.Err = err
-		return
-	}
-	response.Content = string(body)
-	log.Println("Download complete: ", d.URL)
-	d.Result <- response
-}
-
-type ThreadSafePrinter struct {
-	sync.Mutex
-}
-
-func (p ThreadSafePrinter) Println(args ...interface{}) {
-	p.Lock()
-	defer p.Unlock()
-	fmt.Println(args...)
+	self.out <- self.id
+	return nil
 }
 
 func main() {
-	p := ThreadSafePrinter{}
-	done := make(chan bool)
-	results := make(chan Response)
-	go func(results chan Response) {
-		for response := range results {
-			if response.Err != nil {
-				p.Println("Failed to fetch response: ", response.Err)
-			} else {
-				p.Println("Got response: ", response.Content[0:80])
-			}
+	fmt.Println("Worker Pool implementation")
+	out := make(chan int)
+	done := make(chan int)
+	go func() {
+		for i := range out {
+			fmt.Println(i)
 		}
-		done <- true
-	}(results)
-	pool := &FixedPool{Capacity: 4}
+		done <- 1
+	}()
+	pool := NewWorkerPool(10)
 	pool.Start()
-	links := []string{
-		"https://www.google.com",
-		"http://example.com",
-		"https://www.google.com",
-		"http://example.com",
-		"https://www.google.com",
-		"http://example.com",
-		"https://www.google.com",
-		"http://example.com",
-		"https://www.google.com",
-		"http://example.com",
-		"https://www.google.com",
-		"http://example.com",
+	for i := 0; i < 100; i++ {
+		pool.Add(JobImpl{i, out})
 	}
-	for _, link := range links {
-		d := Downloader{URL: link, Result: make(chan Response)}
-		pool.Assign(d)
-		go func(queue, res chan Response) {
-			queue <- (<-res)
-		}(results, d.Result)
-	}
+	fmt.Println("Shutting down the pool\n waitin for all of the jobs to finish")
 	pool.Shutdown()
-	time.Sleep(1 * time.Second)
-	close(results)
+	fmt.Println("All done exiting")
+	close(out)
 	<-done
 }
